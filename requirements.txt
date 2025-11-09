@@ -1,0 +1,9 @@
+gym
+numpy
+torch
+tensorboard
+torchvision
+opencv-python
+matplotlib
+tensorboardX
+setproctitle
