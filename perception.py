@@ -6,13 +6,10 @@ import torch.nn.functional as F
 from torch.nn import Parameter
 from torch.autograd import Variable
 
-"""
-Thay vì dùng deterministic nn.Linear, thêm gaussian noise parametrized (sigma) 
-lên weight và bias để khuyến khích exploration.
-"""
+
 class NoisyLinear(nn.Linear):
     def __init__(self, in_features, out_features, sigma_init=0.017, bias=True):
-        super(NoisyLinear, self).__init__(in_features, out_features, bias=bias)
+        super(NoisyLinear, self).__init__(in_features, out_features, bias=True)
         self.sigma_init = sigma_init
         self.sigma_weight = Parameter(torch.Tensor(out_features, in_features))
         self.sigma_bias = Parameter(torch.Tensor(out_features))
@@ -22,31 +19,22 @@ class NoisyLinear(nn.Linear):
 
     def reset_parameters(self):
         if hasattr(self, 'sigma_weight'):
-            init.uniform_(self.weight, -math.sqrt(3 / self.in_features), math.sqrt(3 / self.in_features))
-            init.uniform_(self.bias, -math.sqrt(3 / self.in_features), math.sqrt(3 / self.in_features))
-            init.constant_(self.sigma_weight, self.sigma_init)
-            init.constant_(self.sigma_bias, self.sigma_init)
+            init.uniform(self.weight, -math.sqrt(3 / self.in_features), math.sqrt(3 / self.in_features))
+            init.uniform(self.bias, -math.sqrt(3 / self.in_features), math.sqrt(3 / self.in_features))
+            init.constant(self.sigma_weight, self.sigma_init)
+            init.constant(self.sigma_bias, self.sigma_init)
 
     def forward(self, input):
-        return F.linear(input, self.weight + self.sigma_weight * self.epsilon_weight,
-                        self.bias + self.sigma_bias * self.epsilon_bias)
-
-# self.epsilon_weight và self.epsilon_bias là buffer đăng ký trước. 
-# Ở đây code gán thuộc tính mới torch.randn(...), torch.zeros(...) cho self.epsilon_weight và self.epsilon_bias, 
-# tức thay thế buffer bằng tensor mới không phải buffer
-# -> Tensor mới sẽ không bên trong state_dict() dưới tên 'epsilon_weight', 'epsilon_bias' (mất khi save/load).
+        return F.linear(input, self.weight + self.sigma_weight * Variable(self.epsilon_weight),
+                        self.bias + self.sigma_bias * Variable(self.epsilon_bias))
 
     def sample_noise(self):
-        # self.epsilon_weight = torch.randn(self.out_features, self.in_features)
-        # self.epsilon_bias = torch.randn(self.out_features)
-        self.epsilon_weight.normal_()
-        self.epsilon_bias.normal_()
+        self.epsilon_weight = torch.randn(self.out_features, self.in_features)
+        self.epsilon_bias = torch.randn(self.out_features)
 
     def remove_noise(self):
-        # self.epsilon_weight = torch.zeros(self.out_features, self.in_features)
-        # self.epsilon_bias = torch.zeros(self.out_features)
-        self.epsilon_weight.zero_()
-        self.epsilon_bias.zero_()
+        self.epsilon_weight = torch.zeros(self.out_features, self.in_features)
+        self.epsilon_bias = torch.zeros(self.out_features)
 
 
 class BiRNN(torch.nn.Module):
@@ -72,14 +60,11 @@ class BiRNN(torch.nn.Module):
         c0 = torch.zeros(self.num_layers * 2, x.size(0), self.hidden_size).to(self.device)
 
         # Forward propagate LSTM
-        # LSTM self.rnn(x, (h0, c0)) trả về (out, (h_n, c_n)).
         if self.lstm:
-            # out, (_, hn) = self.rnn(x, (h0, c0))  # out: tensor of shape (batch_size, seq_length, hidden_size*2)
-            out, (hn, cn) = self.rnn(x, ((h0, c0)))
+            out, (_, hn) = self.rnn(x, (h0, c0))  # out: tensor of shape (batch_size, seq_length, hidden_size*2)
         else:
             out, hn = self.rnn(x, h0)  # out: tensor of shape (batch_size, seq_length, hidden_size*2)
-        # return out, hn
-        return out, cn
+        return out, hn
 
 class RNN(torch.nn.Module):
     def __init__(self, input_size, hidden_size, num_layers, device, head_name):
@@ -102,23 +87,16 @@ class RNN(torch.nn.Module):
         c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(self.device)
         # Forward propagate LSTM
         if self.lstm:
-            # out, (_, hn) = self.rnn(x, (h0, c0))  # out: tensor of shape (batch_size, seq_length, hidden_size)
-            out, (hn, cn) = self.rnn(x, ((h0, c0)))
+            out, (_, hn) = self.rnn(x, (h0, c0))  # out: tensor of shape (batch_size, seq_length, hidden_size*2)
         else:
-            out, hn = self.rnn(x, h0)  # out: tensor of shape (batch_size, seq_length, hidden_size)
+            out, hn = self.rnn(x, h0)  # out: tensor of shape (batch_size, seq_length, hidden_size*2)
 
         return out, hn
 
-'''
-Mục đích: khởi tạo trọng số sao cho phương sai của đầu vào/đầu ra của mỗi layer cân bằng 
-—> giúp gradient lan truyền ổn định trong các mạng sâu.
-'''
+
 def xavier_init(layer):
     torch.nn.init.xavier_uniform_(layer.weight)
-    # torch.nn.init.constant_(layer.bias, 0)
-    # Kiểm tra layer có bias trước khi khởi tạo
-    if layer.bias is not None:
-        torch.nn.init.constant_(layer.bias, 0)
+    torch.nn.init.constant_(layer.bias, 0)
     return layer
 
 
@@ -145,9 +123,7 @@ class AttentionLayer(torch.nn.Module):
         k = torch.tanh(self.K(x))  # [batch_size, sequence_len, weight_dim]
         v = torch.tanh(self.V(x))  # [batch_size, sequence_len, weight_dim]
 
-        # z = torch.bmm(F.softmax(torch.bmm(q, k.permute(0, 2, 1)), dim=2), v)  # [batch_size, sequence_len, weight_dim]
-        # Thiếu scaling: không chia score cho sqrt(d_k)
-        # torch.bmm: batch matrix multiplication (nhân ma trận theo từng batch)
-        z = torch.bmm(F.softmax((torch.bmm(q, k.permute(0, 2, 1))/math.sqrt(self.feature_dim)), dim=-1), v)
+        z = torch.bmm(F.softmax(torch.bmm(q, k.permute(0, 2, 1)), dim=2), v)  # [batch_size, sequence_len, weight_dim]
+
         global_feature = z.sum(dim=1)
         return z, global_feature

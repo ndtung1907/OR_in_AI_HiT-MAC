@@ -47,15 +47,13 @@ class Agent(object):
         self.cxs = torch.zeros(self.num_agents, self.lstm_out).to(device)
         self.rank = 0
         self.rotation = 0
+        self.coverage = 0
 
     def action_train(self):
         self.n_steps += 1
-        value_multi, actions, entropy, log_prob = self.model(self.state.requires_grad_())
+        value_multi, actions, entropy, log_prob = self.model(Variable(self.state, requires_grad=True))
 
-        # Chuyển actions sang NumPy
-        actions_np = actions.detach().cpu().numpy()
-
-        state_multi, reward_multi, self.done, self.info = self.env.step(actions_np)
+        state_multi, reward_multi, self.done, self.info = self.env.step(actions)
         if isinstance(self.done, list): self.done = np.sum(self.done)
         self.state = torch.from_numpy(np.array(state_multi)).float().to(self.device)
         self.reward_org = reward_multi.copy()
@@ -72,11 +70,12 @@ class Agent(object):
         with torch.no_grad():
             value_multi, actions, entropy, log_prob = self.model(Variable(self.state), True)
 
-        # Chuyển actions sang NumPy
-        actions_np = actions.detach().cpu().numpy()
-
-        state_multi, reward_multi, self.done, self.info = self.env.step(actions_np)
+        state_multi, self.reward, self.done, self.info = self.env.step(actions)
         if isinstance(self.done, list): self.done = np.sum(self.done)
+        if 'Coverage_rate' in self.info:
+            self.coverage = self.info['Coverage_rate']
+        else:
+            self.coverage = 0
         self.state = torch.from_numpy(np.array(state_multi)).float().to(self.device)
         if self.env.reset_type == 1:
             self.rotation = self.info['cost']
@@ -114,8 +113,8 @@ class Agent(object):
             self.reward_std = 1
         else:
             delt = reward - self.reward_mean
-            self.reward_mean += delt/self.num_steps
-            self.vk += delt * (reward-self.reward_mean)
+            self.reward_mean = self.reward_mean + delt/self.num_steps
+            self.vk = self.vk + delt * (reward-self.reward_mean)
             self.reward_std = np.sqrt(self.vk/(self.num_steps - 1))
         reward = (reward - self.reward_mean) / (self.reward_std + 1e-8)
         return reward
@@ -131,12 +130,13 @@ class Agent(object):
     def optimize(self, params, optimizer, shared_model, training_mode, device_share):
         R = torch.zeros(len(self.rewards[0]), 1).to(self.device)
         if not self.done:
+            # predict value
             state = self.state
-            value_multi, *others = self.model(state)
-            for i in range(len(self.rewards[0])):
-                R[i][0] = value_multi[i].item()
+            value_multi, *others = self.model(Variable(state, requires_grad=True))
+            for i in range(len(self.rewards[0])):  # num_agent
+                R[i][0] = value_multi[i].data
 
-        self.values.append(R.clone())
+        self.values.append(Variable(R).to(self.device))
 
         batch_size = len(self.entropies[0][0])
         policy_loss = torch.zeros(batch_size, 1).to(self.device)
@@ -144,7 +144,7 @@ class Agent(object):
         entropies = torch.zeros(batch_size, self.dim_action).to(self.device)
         w_entropies = float(self.args.entropy)
 
-        R = R.clone()
+        R = Variable(R, requires_grad=True).to(self.device)
         gae = torch.zeros(1, 1).to(self.device)
 
         for i in reversed(range(len(self.rewards))):
@@ -152,16 +152,18 @@ class Agent(object):
             advantage = R - self.values[i]
             value_loss = value_loss + 0.5 * advantage.pow(2)
             # Generalized Advantage Estimataion
-            delta_t = self.rewards[i] + self.args.gamma * self.values[i + 1].detach() - self.values[i].detach()
+            delta_t = self.rewards[i] + self.args.gamma * self.values[i + 1].data - self.values[i].data
             gae = gae * self.args.gamma * self.args.tau + delta_t
-            policy_loss = policy_loss - (self.log_probs[i] * gae.detach()) - (w_entropies * self.entropies[i])
-            entropies = entropies + self.entropies[i].sum()
+            policy_loss = policy_loss - \
+                (self.log_probs[i] * Variable(gae)) - \
+                (w_entropies * self.entropies[i])
+            entropies += self.entropies[i].sum()
 
 
         self.model.zero_grad()
         loss = policy_loss.sum() + 0.5 * value_loss.sum()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 50)
+        loss.backward(retain_graph=True)
+        torch.nn.utils.clip_grad_norm_(params, 50)
         ensure_shared_grads(self.model, shared_model, self.device, device_share)
         optimizer.step()
 

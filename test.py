@@ -56,6 +56,7 @@ def test(args, shared_model, optimizer, train_modes, n_iters):
             player.reset()
             reward_sum_ep = np.zeros(player.num_agents)
             rotation_sum_ep = 0
+            coverage_sum_ep = 0
 
             fps_counter = 0
             t0 = time.time()
@@ -66,8 +67,12 @@ def test(args, shared_model, optimizer, train_modes, n_iters):
                 fps_counter += 1
                 reward_sum_ep += player.reward
                 rotation_sum_ep += player.rotation
+                coverage_sum_ep += player.coverage
                 if player.done:
-                    AG += reward_sum_ep[0]/rotation_sum_ep*player.num_agents
+                    if rotation_sum_ep > 0:
+                        AG += reward_sum_ep[0]/rotation_sum_ep*player.num_agents
+                    else:
+                        AG += 0
                     reward_sum += reward_sum_ep
                     reward_sum_list.append(reward_sum_ep[0])
                     len_sum += player.eps_len
@@ -75,7 +80,7 @@ def test(args, shared_model, optimizer, train_modes, n_iters):
                     n_iter = 0
                     for n in n_iters:
                         n_iter += n
-
+                    
                     for i, r_i in enumerate(reward_sum_ep):
                         writer.add_scalar('test/reward'+str(i), r_i, n_iter)
 
@@ -87,19 +92,16 @@ def test(args, shared_model, optimizer, train_modes, n_iters):
         # player.max_length:
         ave_AG = AG/args.test_eps
         ave_reward_sum = reward_sum/args.test_eps
-        len_mean = len_sum/args.test_eps
-        reward_step = reward_sum / len_sum
         mean_reward = np.mean(reward_sum_list)
-        std_reward = np.std(reward_sum_list)
+        avg_coverage = coverage_sum_ep / args.test_eps
 
         log['{}_log'.format(args.env)].info(
-            "Time {0}, ave eps reward {1}, ave eps length {2}, reward step {3}, FPS {4}, "
-            "mean reward {5}, std reward {6}, AG {7}".
+            "Time {0}, ave eps reward {1}, FPS {2}, "
+            "mean reward {3}, coverage rate {4}%, AG {5}".
             format(
                 time.strftime("%Hh %Mm %Ss", time.gmtime(time.time() - start_time)),
-                np.around(ave_reward_sum, decimals=2), np.around(len_mean, decimals=2),
-                np.around(reward_step, decimals=2), np.around(np.mean(fps_all), decimals=2),
-                mean_reward, std_reward, np.around(ave_AG, decimals=2)
+                np.around(ave_reward_sum, decimals=2), np.around(np.mean(fps_all), decimals=2),
+                np.around(mean_reward, decimals=2), np.around(avg_coverage, decimals=2), np.around(ave_AG, decimals=2)
             ))
 
         # save model
@@ -115,6 +117,7 @@ def test(args, shared_model, optimizer, train_modes, n_iters):
 
         time.sleep(args.sleep_time)
         if n_iter > args.max_step:
+            writer.close()
             env.close()
             for id in range(0, args.workers):
                 train_modes[id] = -100

@@ -5,7 +5,6 @@ import torch.nn as nn
 from gym import spaces
 import torch.nn.functional as F
 from torch.autograd import Variable
-from torch.distributions import Categorical
 
 from utils import norm_col_init, weights_init
 from perception import NoisyLinear, BiRNN, AttentionLayer
@@ -29,11 +28,11 @@ def wrap_action(self, action):
     return out
 
 
-def sample_action(z, device, test=False):
-    # Discrete actions (Categorical) actor trả logits z. Ta dùng softmax trên logits để lấy phân phối. sigma không có ý nghĩa ở đây
-    logits = z
-    prob = F.softmax(logits, dim=-1)
-    log_prob = F.log_softmax(logits, dim=-1)
+def sample_action(mu_multi, sigma_multi, device, test=False):
+    # discrete
+    logit = mu_multi
+    prob = F.softmax(logit, dim=-1)
+    log_prob = F.log_softmax(logit, dim=-1)
     entropy = -(log_prob * prob).sum(-1, keepdim=True)
     if test:
         action = prob.max(-1)[1].data
@@ -68,8 +67,7 @@ class ValueNet(nn.Module):
 
     def remove_noise(self):
         if self.noise:
-            # self.critic_linear.sample_noise()
-            self.critic_linear.remove_noise()
+            self.critic_linear.sample_noise()
 
 
 class AMCValueNet(nn.Module):
@@ -91,8 +89,8 @@ class AMCValueNet(nn.Module):
             self.critic_linear = nn.Linear(2 * input_dim, num)
             self.critic_linear.weight.data = norm_col_init(self.critic_linear.weight.data, 0.1)
             self.critic_linear.bias.data.fill_(0)
-            self.attention = AttentionLayer(input_dim, input_dim, device)
 
+            self.attention = AttentionLayer(input_dim, input_dim, device)
         self.feature_dim = input_dim
 
     def forward(self, x, goal):
@@ -119,8 +117,8 @@ class AMCValueNet(nn.Module):
 
     def remove_noise(self):
         if self.noise:
-            self.critic_linear.remove_noise()
-            
+            self.critic_linear.sample_noise()
+
 
 class PolicyNet(nn.Module):
     def __init__(self, input_dim, action_space, head_name, device):
@@ -141,17 +139,9 @@ class PolicyNet(nn.Module):
             self.actor_linear.bias.data.fill_(0)
 
     def forward(self, x, test=False):
-        # logits = F.relu(self.actor_linear(x)) # không nên để Relu ở logits, logits cần là real-valued
-        logits = self.actor_linear(x)
-        # sigma = torch.ones_like(logits)
-        dist = Categorical(logits=logits)
-        if test:
-            action = torch.argmax(logits, dim=-1)
-        else:
-            action = dist.sample()
-        # action, entropy, log_prob = sample_action(logits, sigma, self.device, test)
-        log_prob = dist.log_prob(action).unsqueeze(-1)
-        entropy = dist.entropy().unsqueeze(-1)
+        mu = F.relu(self.actor_linear(x))
+        sigma = torch.ones_like(mu)
+        action, entropy, log_prob = sample_action(mu, sigma, self.device, test)
         return action, entropy, log_prob
 
     def sample_noise(self):
@@ -161,8 +151,8 @@ class PolicyNet(nn.Module):
 
     def remove_noise(self):
         if self.noise:
-            self.actor_linear.remove_noise()
-            self.actor_linear2.remove_noise()
+            self.actor_linear.sample_noise()
+            self.actor_linear2.sample_noise()
 
 
 class EncodeBiRNN(torch.nn.Module):
@@ -179,11 +169,11 @@ class EncodeBiRNN(torch.nn.Module):
 
     def forward(self, inputs):
         x = inputs
-        hn, cn = self.encoder(x)
+        cn, hn = self.encoder(x)
 
-        feature = hn  # shape: [bs, num_camera, lstm_dim]
+        feature = cn  # shape: [bs, num_camera, lstm_dim]
 
-        global_feature = cn.permute(1, 0, 2).reshape(-1)
+        global_feature = hn.permute(1, 0, 2).reshape(-1)
 
         return feature, global_feature
 
@@ -220,7 +210,10 @@ class A3C_Single(torch.nn.Module):  # single vision Tracking
 
         self.head_name = head_name
 
-        self.encoder = AttentionLayer(obs_dim, lstm_out, device)
+        self.encoder = EncodeLinear(obs_dim, lstm_out, head_name, device)
+        feature_dim = self.encoder.feature_dim
+
+        self.attention = AttentionLayer(feature_dim, lstm_out, device)
         self.critic = ValueNet(lstm_out, head_name, 1)
         self.actor = PolicyNet(lstm_out, action_spaces[0], head_name, device)
 
@@ -228,8 +221,9 @@ class A3C_Single(torch.nn.Module):  # single vision Tracking
         self.device = device
 
     def forward(self, inputs, test=False):
-        data = inputs
-        _, feature = self.encoder(data)
+        data = Variable(inputs, requires_grad=True)
+        feature = self.encoder(data) # Qua lớp Linear
+        _, feature = self.attention(feature) # Qua lớp Attention
 
         actions, entropies, log_probs = self.actor(feature, test)
         values = self.critic(feature)
@@ -238,8 +232,10 @@ class A3C_Single(torch.nn.Module):  # single vision Tracking
 
     def sample_noise(self):
         self.actor.sample_noise()
+        self.actor.sample_noise()
 
     def remove_noise(self):
+        self.actor.remove_noise()
         self.actor.remove_noise()
 
 
@@ -291,6 +287,9 @@ class A3C_Multi(torch.nn.Module):
 
     def sample_noise(self):
         self.actor.sample_noise()
-        
+        self.actor.sample_noise()
+
     def remove_noise(self):
         self.actor.remove_noise()
+        self.actor.remove_noise()
+

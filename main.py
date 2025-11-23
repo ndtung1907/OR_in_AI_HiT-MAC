@@ -40,7 +40,7 @@ parser.add_argument('--train-mode', type=int, default=-1, metavar='TM', help='hi
 parser.add_argument('--input-size', type=int, default=80, metavar='IS', help='input image size')
 parser.add_argument('--lstm-out', type=int, default=128, metavar='LO', help='lstm output size')
 parser.add_argument('--sleep-time', type=int, default=0, metavar='LO', help='seconds')
-parser.add_argument('--max-step', type=int, default=1000, metavar='LO', help='max learning steps')
+parser.add_argument('--max-step', type=int, default=5000000, metavar='LO', help='max learning steps')
 parser.add_argument('--render_save', dest='render_save', action='store_true', help='render save')
 
 def start():
@@ -65,13 +65,24 @@ def start():
     del env
 
     if args.load_coordinator_dir is not None:
+        print(f"Loading checkpoint from {args.load_coordinator_dir}")
         saved_state = torch.load(
             args.load_coordinator_dir,
             map_location=lambda storage, loc: storage)
-        if args.load_coordinator_dir[-3:] == 'pth':
-            shared_model.load_state_dict(saved_state['model'], strict=False)
+        
+        if args.load_coordinator_dir.endswith('pth'):
+            pretrained_dict = saved_state['model']
         else:
-            shared_model.load_state_dict(saved_state)
+            pretrained_dict = saved_state
+
+        model_dict = shared_model.state_dict()
+
+        pretrained_dict = {k: v for k, v in pretrained_dict.items() 
+                           if k in model_dict and v.shape == model_dict[k].shape}
+        
+        model_dict.update(pretrained_dict)
+        shared_model.load_state_dict(model_dict)
+        print(f"Successfully loaded {len(pretrained_dict)} layers.")
 
     params = shared_model.parameters()
     if args.shared_optimizer:

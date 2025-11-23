@@ -97,7 +97,6 @@ def train(rank, args, shared_model, optimizer, train_modes, n_iters, env=None):
         writer.add_scalar('train/entropies_sum', entropies.sum(), player.n_steps)
 
         writer.add_scalar('train/ave_reward', ave_reward[0] - ave_reward_longterm[0], player.n_steps)
-        writer.add_scalar('train/mode', training_mode, player.n_steps)
         writer.add_scalar('train/fps', fps, player.n_steps)
 
         # writer.add_scalar('train/lr', lr[0], n_iter)
